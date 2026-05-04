@@ -4,4 +4,4 @@ pandas-ta
 streamlit-lightweight-charts
 yfinance
 numpy
-1xml
+lxml
