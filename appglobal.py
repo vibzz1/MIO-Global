@@ -105,131 +105,35 @@ MARKETS = {
 }
 
 # =============================================================================
-# TICKER UNIVERSES — Wikipedia scrape + fallback curated lists
+# TICKER UNIVERSES — comprehensive hardcoded lists (no Wikipedia dependency)
 # =============================================================================
+from tickers_global import (
+    get_sp500_tickers as _sp500,
+    get_nikkei225_tickers as _nikkei,
+    get_kospi_tickers as _kospi,
+    get_csi300_tickers as _csi300,
+    get_germany_tickers as _germany,
+)
 
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
-    """S&P 500 from Wikipedia."""
-    try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        tables = pd.read_html(url)
-        df = tables[0]
-        tickers = df['Symbol'].str.replace('.', '-', regex=False).tolist()
-        sectors = dict(zip(tickers, df['GICS Sector']))
-        return tickers, sectors
-    except:
-        # Fallback: top 100 liquid US stocks
-        tickers = [
-            "AAPL","MSFT","AMZN","NVDA","GOOGL","META","TSLA","BRK-B","UNH","JNJ",
-            "XOM","JPM","V","PG","MA","HD","CVX","MRK","ABBV","LLY",
-            "PEP","KO","COST","AVGO","TMO","MCD","WMT","CSCO","ACN","ABT",
-            "DHR","NEE","LIN","PM","TXN","UNP","BMY","RTX","AMGN","HON",
-            "LOW","QCOM","UPS","MS","GS","SCHW","BLK","ADP","INTC","AMD",
-            "CAT","DE","BA","GE","MMM","IBM","DIS","CRM","ORCL","ADBE",
-            "NOW","PYPL","SQ","SHOP","SNOW","PLTR","COIN","UBER","ABNB","DASH",
-            "ZS","CRWD","PANW","DDOG","NET","MDB","TTWO","EA","ATVI","NFLX",
-            "CMG","SBUX","NKE","LULU","TJX","ROST","DG","DLTR","WBA","CVS",
-            "CI","HUM","ELV","MCK","CAH","ABC","SYK","BSX","MDT","ZBH",
-        ]
-        return tickers, {}
-
+    return _sp500()
 
 @st.cache_data(ttl=86400)
 def get_nikkei225_tickers():
-    """Nikkei 225 from Wikipedia."""
-    try:
-        url = "https://en.wikipedia.org/wiki/Nikkei_225"
-        tables = pd.read_html(url)
-        # Find the table with ticker codes
-        for t in tables:
-            cols = [str(c).lower() for c in t.columns]
-            if any('code' in c or 'ticker' in c for c in cols):
-                code_col = [c for c in t.columns if 'code' in str(c).lower() or 'ticker' in str(c).lower()][0]
-                tickers = [str(int(x)) for x in t[code_col] if pd.notna(x)]
-                sector_col = [c for c in t.columns if 'sector' in str(c).lower() or 'industry' in str(c).lower()]
-                sectors = {}
-                if sector_col:
-                    sectors = dict(zip(tickers, t[sector_col[0]].astype(str)))
-                return tickers, sectors
-        raise ValueError("No ticker column found")
-    except:
-        # Fallback: major Nikkei components
-        tickers = [
-            "7203","6758","9984","8306","6861","6501","7267","4063","6902","8035",
-            "9433","9432","7974","4502","4503","6098","7751","6367","8316","6954",
-            "3382","7741","4568","6273","8411","9983","2914","4901","6326","8058",
-            "8031","6702","7269","6503","4519","6752","5401","7011","6301","3407",
-            "8601","2502","2802","4452","9020","9022","9021","1925","1928","5108",
-            "6971","7272","8802","6506","4911","6645","7733","5713","3405","6988",
-            "4543","8053","7731","9613","2801","4507","2503","8725","5802","6479",
-            "4689","3086","8830","6762","5201","7912","4151","6113","7832","2413",
-        ]
-        return tickers, {}
-
+    return _nikkei()
 
 @st.cache_data(ttl=86400)
-def get_kospi200_tickers():
-    """KOSPI 200 — curated list of major Korean stocks."""
-    # KOSPI uses 6-digit codes on yfinance with .KS suffix
-    tickers = [
-        "005930","000660","005380","035420","051910","006400","068270","028260",
-        "105560","055550","066570","003550","096770","012330","034730","015760",
-        "032830","003670","009150","018260","033780","086790","036570","011170",
-        "316140","352820","000270","005490","010950","017670","034020","030200",
-        "035720","259960","247540","090430","323410","377300","003490","009540",
-        "010120","010130","000810","004020","011780","001570","005830","021240","024110",
-        "028050","032640","036460","042660","051900","053800","055660","064350",
-        "069500","078930","086280","088350","097950","112040","139480","161390",
-        "180640","192820","207940","214320","241560","251270","263750","271560",
-        "282330","293490","302440","326030","336260","357780","373220","402340",
-        "004170","006800","007070","010140","011070","011200","016360","018880",
-        "020150","023530","029780","034220","035250","039490","044090","047050",
-        "047810","052690","058470","060250","067630","069260","071050","078340",
-    ]
-    return tickers, {}
-
+def get_kospi_tickers():
+    return _kospi()
 
 @st.cache_data(ttl=86400)
 def get_csi300_tickers():
-    """CSI 300 — major Chinese A-shares. Suffix baked in (.SS or .SZ)."""
-    # Shanghai stocks: .SS, Shenzhen stocks: .SZ
-    # These are already full yfinance symbols
-    tickers = [
-        "600519.SS","601318.SS","600036.SS","600276.SS","601166.SS","600030.SS",
-        "601398.SS","600900.SS","600887.SS","601888.SS","600809.SS","601012.SS",
-        "603259.SS","601628.SS","600585.SS","601668.SS","600031.SS","601601.SS",
-        "600050.SS","601919.SS","600176.SS","600104.SS","601225.SS","600690.SS",
-        "600048.SS","603501.SS","601688.SS","600436.SS","601816.SS","600183.SS",
-        "601857.SS","600588.SS","601899.SS","600196.SS","603986.SS","601138.SS",
-        "600346.SS","600703.SS","601390.SS","600029.SS","601088.SS","600989.SS",
-        "601211.SS","600406.SS","600132.SS","601800.SS","603288.SS","600570.SS",
-        "000858.SZ","000333.SZ","000651.SZ","000568.SZ","002714.SZ","300750.SZ",
-        "002415.SZ","000725.SZ","002230.SZ","000001.SZ","002304.SZ","300059.SZ",
-        "002352.SZ","000002.SZ","002475.SZ","300015.SZ","002049.SZ","000063.SZ",
-        "002142.SZ","000776.SZ","002027.SZ","300124.SZ","002601.SZ","300274.SZ",
-        "002594.SZ","300760.SZ","002032.SZ","300413.SZ","002460.SZ","300033.SZ",
-        "002241.SZ","300122.SZ","000100.SZ","002311.SZ","000338.SZ","002466.SZ",
-        "300347.SZ","002371.SZ","300529.SZ","000661.SZ","002050.SZ","300136.SZ",
-    ]
-    return tickers, {}
-
+    return _csi300()
 
 @st.cache_data(ttl=86400)
 def get_germany_tickers():
-    """HDAX 100 — top German stocks."""
-    tickers = [
-        "SAP","SIE","ALV","DTE","MBG","BMW","BAS","MUV2","DPW","IFX",
-        "AIR","ADS","SHL","BEI","HEN3","VOW3","RWE","DB1","FRE","MRK",
-        "HEI","EOAN","CON","1COV","SRT3","ZAL","PUM","LEG","QIA","FME",
-        "MTX","HNR1","ENR","GXI","EVK","TKA","FPE3","RAA","BOSS","KGX",
-        "DHL","HFG","DHER","SY1","KCO","LXS","HHFA","NDA","DEQ","AFX",
-        "HAG","WAF","GFT","S92","AT1","AIXA","PNE","SBS","EVD","VNA",
-        "RHM","DTG","FNTN","PSM","BNR","NDX1","G1A","HOT","TLX","KWS",
-        "WCH","JUN3","NOEJ","SZU","TEG","SGL","FIE","COP","NEM","GLJ",
-    ]
-    return tickers, {}
-
+    return _germany()
 
 def get_tickers_for_market(market_key):
     """Route to correct ticker fetch function."""
@@ -241,7 +145,7 @@ def get_tickers_for_market(market_key):
     elif source == "nikkei225":
         return get_nikkei225_tickers()
     elif source == "kospi200":
-        return get_kospi200_tickers()
+        return get_kospi_tickers()
     elif source == "csi300":
         return get_csi300_tickers()
     elif source == "germany":
