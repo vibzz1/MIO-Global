@@ -215,7 +215,7 @@ def get_kospi_tickers():
         "005830","021240","024110","028050","032640","036460","042660","051900",
         "053800","055660","064350","047050","047810","052690","058470","060250",
         "067630","069260","071050","078340","010140","011070","011200","016360",
-        "069500","078930","086280","088350","097950","112040","139480","161390",
+        "078930","086280","088350","097950","112040","139480","161390",
         "180640","192820","207940","214320","241560","251270","263750","271560",
         "282330","293490","302440","326030","336260","357780","373220",
         "004170","006800","007070","018880","020150","023530","029780","034220",
@@ -476,39 +476,86 @@ def score_base_quality(df, latest):
         for i in range(-11, -1)
     )
 
+    # ===== NEW: CONSOLIDATION EXISTENCE CHECK =====
+    # A real base = stock PAUSES for 2-6 weeks in a tight range.
+    # No pause = no base = no setup. Period.
+    #
+    # Measure 1: "Ranging days" — how many of last 20 bars (excl trigger)
+    # had small close-to-close change (<2%) AND contained daily range
+    atr_20_pre = pre_trigger.get('ATR_20', 0)
+    if pd.isna(atr_20_pre) or atr_20_pre == 0:
+        atr_20_pre = df['ATR_20'].iloc[-2] if 'ATR_20' in df.columns else 1
+
+    ranging_days = 0
+    for i in range(-21, -1):  # last 20 bars before trigger
+        if abs(i) > len(df): continue
+        cc_change = abs(df['Close'].iloc[i] - df['Close'].iloc[i-1]) / df['Close'].iloc[i-1] * 100
+        day_range = (df['High'].iloc[i] - df['Low'].iloc[i])
+        if cc_change < 2.0 and day_range < atr_20_pre * 1.5:
+            ranging_days += 1
+
+    # Measure 2: 20-bar range width (excl trigger) — how wide is the "base"?
+    base_high = df['High'].iloc[-21:-1].max()
+    base_low = df['Low'].iloc[-21:-1].min()
+    base_width_pct = (base_high - base_low) / base_high * 100 if base_high > 0 else 0
+
+    # A proper base: ranging_days >= 10, width 5-15%
+    # Grinding up with no pause: ranging_days < 8, width might be large
+    has_real_base = ranging_days >= 10 and 3 <= base_width_pct <= 20
+    has_weak_base = ranging_days >= 7
+    no_base = ranging_days < 7
+
+    # ===== SCORING =====
     score = 0
 
+    # Base depth (0-8)
     if depth_ratio <= 0.3 and dist_from_peak >= 3:
         score += 8
     elif 3 <= dist_from_peak <= 15:
         score += 8
-    elif 1 <= dist_from_peak < 3:
-        score += 6
     elif 15 < dist_from_peak <= 25:
         score += 5 if depth_ratio <= 0.4 else 4
+    elif 1 <= dist_from_peak < 3:
+        score += 3  # REDUCED: barely pulled back, questionable base
     elif dist_from_peak < 1:
-        score += 3
+        score += 1  # at highs, definitely no base
     elif 25 < dist_from_peak <= 50 and depth_ratio <= 0.3:
         score += 5
     else:
         score += 1
 
+    # ATR contraction (0-8)
     if atr_contraction >= 30: score += 8
     elif atr_contraction >= 15: score += 6
     elif atr_contraction >= 0: score += 3
-    else: score += 1
+    else: score += 1  # volatility expanding = no base forming
 
+    # Volume contraction in base (0-8)
     if vol_contraction >= 40: score += 8
     elif vol_contraction >= 20: score += 6
     elif vol_contraction >= 5: score += 4
-    else: score += 1
+    elif vol_contraction >= -10: score += 2
+    else: score += 0  # volume expanding in "base" = not a base
 
+    # Base at resistance (0-5)
     if pct_from_resistance <= 5: score += 5
     elif pct_from_resistance <= 15: score += 3
     elif pct_from_resistance <= 30 and depth_ratio <= 0.3: score += 3
     else: score += 1
 
+    # Tight closes bonus (0-4)
     score += min(tight_days, 4)
+
+    # ===== HARD CAPS: NO BASE = NO SCORE =====
+    if no_base:
+        score = min(score, 5)   # Didn't consolidate at all
+    elif not has_real_base and dist_from_peak < 3:
+        score = min(score, 8)   # Weak base + barely pulled back
+
+    # Negative vol contraction penalty (volume expanding = buying into momentum, not a base)
+    if vol_contraction < -20:
+        score = min(score, 6)
+
     score = min(score, 33)
 
     return score, {
@@ -517,7 +564,9 @@ def score_base_quality(df, latest):
         'Vol Contr': f"{vol_contraction:.0f}%",
         'Near Res': f"{pct_from_resistance:.0f}%",
         'Depth/Rally': f"{depth_ratio:.2f}",
-        'Tight Days': tight_days
+        'Tight Days': tight_days,
+        'Range Days': f"{ranging_days}/20",
+        'Base Width': f"{base_width_pct:.1f}%",
     }
 
 
@@ -645,6 +694,10 @@ def score_stage(df, latest):
     if not sma50_above_200 and has_200dma: score -= 3
     if dist_from_200 > 35 and sma200_up: score -= 2
 
+    # LATE S2 HARD CAP: 3rd+ base = momentum exhausting, avoid per system rules
+    if is_late_s2:
+        score = min(score, 12)
+
     score = max(min(score, 33), 0)
 
     if is_early_s2: stg_label = "S2·1st"
@@ -691,9 +744,13 @@ def score_timing(df, latest):
     close_position = (latest['Close'] - latest['Low']) / cr if cr > 0 else 0.5
 
     if br > 0.6 and latest['Close'] > latest['Open'] and close_position > 0.7: candle_pts = 8
-    elif br > 0.4 and latest['Close'] > latest['Open']: candle_pts = 5
-    elif latest['Close'] > latest['Open']: candle_pts = 3
+    elif br > 0.4 and latest['Close'] > latest['Open'] and close_position > 0.5: candle_pts = 5
+    elif br > 0.3 and latest['Close'] > latest['Open']: candle_pts = 2
+    elif latest['Close'] > latest['Open']: candle_pts = 1  # Weak green / doji
     else: candle_pts = 0
+
+    # Weak candle flag: doji, spinning top, small body = NOT a trigger
+    is_weak_candle = br < 0.35 or (latest['Close'] <= latest['Open']) or close_position < 0.4
 
     high_50 = df['High'].iloc[-50:].max()
     pct_from_breakout = (high_50 - latest['Close']) / high_50 * 100
@@ -731,6 +788,12 @@ def score_timing(df, latest):
     raw_score = ma_pts + vol_pts + candle_pts + bkout_pts + breakout_bonus
     score = max(min(raw_score - extension_penalty, 34), 0)
 
+    # HARD CAPS: Weak trigger = not a setup
+    if is_weak_candle:
+        score = min(score, 10)  # Doji/weak candle caps timing
+    if vol_expansion < 0.8:
+        score = min(score, 8)   # Below-average volume = no conviction
+
     return score, {
         'Dist 20DMA': f"{pct_20dma:+.1f}%",
         'Vol Exp': f"{vol_expansion:.1f}x",
@@ -738,7 +801,8 @@ def score_timing(df, latest):
         'Close Pos': f"{close_position:.0%}",
         'Near Bkout': f"{pct_from_breakout:.1f}%",
         'Bkout Age': f"{days_above_resistance}d",
-        'Fresh BO': "✅" if is_volume_breakout else "❌"
+        'Fresh BO': "✅" if is_volume_breakout else "❌",
+        'Candle': "Strong" if not is_weak_candle else "Weak"
     }
 
 
