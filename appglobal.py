@@ -389,6 +389,8 @@ def check_stock(ticker, market_key, ind_map):
         df['ADVOL_20'] = df['Volume'].rolling(20).mean()
         df['ADVOL_50'] = df['Volume'].rolling(50).mean()
 
+        source = MARKETS[market_key]["source"]
+
         df.dropna(inplace=True)
         if len(df) < 22:
             return None
@@ -397,16 +399,13 @@ def check_stock(ticker, market_key, ind_map):
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Volume thresholds adjust by market
-        # US/Europe: 50K shares, Japan/Korea/China: 100K (different share structures)
-        source = MARKETS[market_key]["source"]
+        # Per-market share volume thresholds (Asian markets trade in larger lot sizes)
         vol_threshold = 100000 if source in ["nikkei225", "kospi200", "csi300"] else 50000
 
         c1 = latest['ADVOL_20'] > vol_threshold
         c2 = latest['ADVOL_50'] > vol_threshold
-        # MIO: !(sma(20)<sma(50))@{0..20} — SMA20 not below SMA50 recently
-        # Use tolerance: SMA20 >= SMA50 * 0.99 to handle convergence in tight bases
-        c3 = (df['SMA_20'].iloc[-21:] >= df['SMA_50'].iloc[-21:] * 0.99).all()
+        # MIO: !(sma(20)<sma(50))@{0..20} = NOT(below at ALL 21 bars) = above at SOME bar
+        c3 = not (df['SMA_20'].iloc[-21:] < df['SMA_50'].iloc[-21:]).all()
         c4 = not (latest['Close'] < latest['SMA_50'] and sma50_trend_dn_20)
         c5 = latest['Close'] > latest['SMA_10']
         c6 = latest['Close'] > latest['SMA_20']
@@ -808,14 +807,73 @@ def score_timing(df, latest):
     }
 
 
+# ------------------------------------------------------------------
+# VOLUME PROFILE (25 pts)
+# ------------------------------------------------------------------
+def score_volume_profile(df, latest):
+    score = 0
+    detail = {}
+
+    # 1. Up/Down Vol Ratio over last 20 bars (10 pts)
+    last20 = df.iloc[-20:]
+    up_mask = last20['Close'] >= last20['Open']
+    up_vol = last20.loc[up_mask, 'Volume'].sum()
+    dn_vol = last20.loc[~up_mask, 'Volume'].sum()
+    ud_ratio = (up_vol / dn_vol) if dn_vol > 0 else 999.0
+    if ud_ratio >= 1.5:   ud_pts = 10
+    elif ud_ratio >= 1.2: ud_pts = 7
+    elif ud_ratio >= 1.0: ud_pts = 4
+    else:                 ud_pts = 0
+    score += ud_pts
+    detail['ud_ratio'] = round(min(ud_ratio, 99.0), 2)
+    detail['ud_pts'] = ud_pts
+
+    # 2. Volume Contraction: base vs prior trend (10 pts)
+    base_vol = df['Volume'].iloc[-20:].mean()
+    if len(df) >= 70:
+        trend_vol = df['Volume'].iloc[-70:-20].mean()
+    else:
+        trend_vol = df['Volume'].iloc[:-20].mean() if len(df) > 20 else base_vol
+    contraction = (base_vol / trend_vol) if trend_vol > 0 else 1.0
+    if contraction <= 0.70:   vc_pts = 10
+    elif contraction <= 0.90: vc_pts = 7
+    elif contraction <= 1.10: vc_pts = 4
+    else:                     vc_pts = 0
+    score += vc_pts
+    detail['contraction'] = round(contraction, 2)
+    detail['vc_pts'] = vc_pts
+
+    # 3. Today's Volume vs 50-day avg (5 pts)
+    today_vol = latest['Volume']
+    avg_vol = df['Volume'].iloc[-50:].mean()
+    vol_ratio = (today_vol / avg_vol) if avg_vol > 0 else 1.0
+    if vol_ratio >= 1.5:   tv_pts = 5
+    elif vol_ratio >= 1.0: tv_pts = 3
+    elif vol_ratio >= 0.7: tv_pts = 1
+    else:                  tv_pts = 0
+    score += tv_pts
+    detail['vol_ratio'] = round(vol_ratio, 2)
+    detail['tv_pts'] = tv_pts
+
+    score = max(min(score, 25), 0)
+    detail['total'] = score
+    return score, detail
+
+
 def score_setup(res):
     df = _enrich_df(res['chart_data'].copy())
     latest = df.iloc[-1]
 
-    base_s, base_d = score_base_quality(df, latest)
-    stage_s, stage_d = score_stage(df, latest)
-    timing_s, timing_d = score_timing(df, latest)
-    total = base_s + stage_s + timing_s
+    base_s_raw, base_d = score_base_quality(df, latest)
+    stage_s_raw, stage_d = score_stage(df, latest)
+    timing_s_raw, timing_d = score_timing(df, latest)
+    volume_s, volume_d = score_volume_profile(df, latest)
+
+    # Rescale legacy 33/33/34 → 25/25/25
+    base_s = round(base_s_raw * 25 / 33)
+    stage_s = round(stage_s_raw * 25 / 33)
+    timing_s = round(timing_s_raw * 25 / 34)
+    total = base_s + stage_s + timing_s + volume_s
 
     if total >= 75: grade = "A+"
     elif total >= 60: grade = "A"
@@ -828,8 +886,10 @@ def score_setup(res):
     risk = round((entry - sl) / entry * 100, 1)
 
     return {'Grade': grade, 'Total': total, 'Base': base_s, 'Stage': stage_s,
-            'Timing': timing_s, 'Entry': round(entry, 2), 'SL': sl, 'Risk%': risk,
-            'base_det': base_d, 'stage_det': stage_d, 'timing_det': timing_d}
+            'Timing': timing_s, 'Volume': volume_s,
+            'Entry': round(entry, 2), 'SL': sl, 'Risk%': risk,
+            'base_det': base_d, 'stage_det': stage_d,
+            'timing_det': timing_d, 'volume_det': volume_d}
 
 
 # =============================================================================
@@ -899,9 +959,10 @@ def render_score_panel(res, currency="$"):
 
     st.markdown(f'<div class="grade-badge {grade_class}">{grade} · {total}/100</div>', unsafe_allow_html=True)
 
-    dims = [('🧱 Base', res.get('Base', 0), 33),
-            ('📶 Stage', res.get('Stage', 0), 33),
-            ('⏱️ Timing', res.get('Timing', 0), 34)]
+    dims = [('🧱 Base', res.get('Base', 0), 25),
+            ('📶 Stage', res.get('Stage', 0), 25),
+            ('⏱️ Timing', res.get('Timing', 0), 25),
+            ('📊 Volume', res.get('Volume', 0), 25)]
 
     for label, val, mx in dims:
         pct = int(val / mx * 100)
@@ -914,7 +975,7 @@ def render_score_panel(res, currency="$"):
 
     st.markdown('<div style="margin-top:8px">', unsafe_allow_html=True)
     all_details = {}
-    for k in ['base_det', 'stage_det', 'timing_det']:
+    for k in ['base_det', 'stage_det', 'timing_det', 'volume_det']:
         all_details.update(res.get(k, {}))
     for label, value in all_details.items():
         st.markdown(f'<div class="detail-row"><span class="detail-label">{label}</span>'
@@ -987,8 +1048,8 @@ if run_scan and selected_markets:
                     all_scored.append(scored)
                 except:
                     all_scored.append({**res, 'Grade': '?', 'Total': 0, 'Base': 0,
-                        'Stage': 0, 'Timing': 0, 'Entry': 0, 'SL': 0, 'Risk%': 0,
-                        'base_det': {}, 'stage_det': {}, 'timing_det': {},
+                        'Stage': 0, 'Timing': 0, 'Volume': 0, 'Entry': 0, 'SL': 0, 'Risk%': 0,
+                        'base_det': {}, 'stage_det': {}, 'timing_det': {}, 'volume_det': {},
                         'currency': currency, 'flag': flag})
         else:
             st.warning(f"{flag} No setups found in {market_key}")
@@ -1011,11 +1072,12 @@ if run_scan and selected_markets:
                 'Base': s.get('Base', 0),
                 'Stage': s.get('Stage', 0),
                 'Timing': s.get('Timing', 0),
+                'Volume': s.get('Volume', 0),
                 'CMP': s.get('Entry', 0),
                 'SL': s.get('SL', 0),
                 'Risk%': s.get('Risk%', 0),
             }
-            for dk in ['base_det', 'stage_det', 'timing_det']:
+            for dk in ['base_det', 'stage_det', 'timing_det', 'volume_det']:
                 if s.get(dk):
                     row.update(s[dk])
             table_data.append(row)
